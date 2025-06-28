@@ -42,6 +42,8 @@ const app = express();
 const fileStore = sessionFileStore(session);
 const server = http.Server(app);
 import axios from 'axios'
+import path from 'path';
+import { promises as fs } from 'fs';
 
 
 // Use the EJS template engine
@@ -138,21 +140,13 @@ const createNewSession = async (req, res) => {
 
 
 // GET request to the root.
-// Display the login screen if the user is not logged in yet, otherwise the
-// photo frame.
+// Display the login screen if the user is not logged in yet, otherwise always start a new picker session.
 app.get('/', async (req, res) => {
   if (!req.user || !req.isAuthenticated()) {
     // Not logged in yet.
     res.render('pages/login');
   } else {
-    
-    let session = await sessionCache.getItem(req.user.profile.id)
-    if(!session) {
-      createNewSession(req, res)
-    } else {
-      res.render('pages/picker', {session: session});      
-    }
-    
+    createNewSession(req, res);
   }
 });
 
@@ -189,24 +183,40 @@ app.get('/list', async (req, res) => {
         const data = await response.json();
         mediaItems = mediaItems.concat(data.mediaItems || []);
         pageToken = data.nextPageToken;
+        console.log(`Fetched ${mediaItems.length} media items so far (nextPageToken=${pageToken})`);
       } while (pageToken);
 
       // Build summary: count photos and videos per day (YYYY-MM-DD)
       const summary = {};
       mediaItems.forEach((item) => {
-        const meta = item.mediaFile?.mediaFileMetadata;
-        if (meta?.creationTime) {
-          const day = meta.creationTime.substring(0, 10);
-          const entry = summary[day] || { photos: 0, videos: 0 };
-          if (item.type === 'VIDEO') {
-            entry.videos++;
-          } else {
-            entry.photos++;
-          }
-          summary[day] = entry;
+        const creationTime = item.createTime;
+        if (!creationTime) return;
+        const day = creationTime.substring(0, 10);
+        if (!summary[day]) summary[day] = { photos: 0, videos: 0 };
+        if (item.type === 'VIDEO') {
+          summary[day].videos++;
+        } else {
+          summary[day].photos++;
         }
       });
-
+      console.log(`Fetched ${mediaItems.length} media items for session ${sessionId}`);
+      if (config.jsonSaveLocation) {
+        try {
+          await fs.mkdir(config.jsonSaveLocation, { recursive: true });
+          // Sort dates descending (newest first) to name file in descending order
+          const days = Object.keys(summary).sort().reverse();
+          if (days.length) {
+            const [year1, month1, day1] = days[0].split('-');
+            const [year2, month2, day2] = days[days.length - 1].split('-');
+            const fileName = `${day1}${month1}${year1}_${day2}${month2}${year2}.json`;
+            const filePath = path.join(config.jsonSaveLocation, fileName);
+            await fs.writeFile(filePath, JSON.stringify(summary, null, 2));
+            console.log(`Saved summary JSON to file: ${filePath}`);
+          }
+        } catch (err) {
+          console.error(`Error saving summary JSON: ${err}`);
+        }
+      }
       res.json(summary);
     }
 
